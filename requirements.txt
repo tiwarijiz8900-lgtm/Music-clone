@@ -19,7 +19,7 @@ gpytranslate
 gtts
 hachoir
 heroku3
-httpx
+httpx[http2]==0.27.2
 img2pdf
 instaloader
 lexica-api
