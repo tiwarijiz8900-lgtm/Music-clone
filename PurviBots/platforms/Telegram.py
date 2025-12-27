@@ -1,176 +1,166 @@
+# ======================================================
+# © 2025-26 Purvi Bots | MIT License
+# Developer : @TheSigmaCoder
+# ======================================================
+
 import asyncio
 import os
-import time
+import re
+import json
+import random
+import aiohttp
+import yt_dlp
+
 from typing import Union
+from pyrogram.enums import MessageEntityType
+from pyrogram.types import Message
+from py_yt import VideosSearch
 
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Voice
+from PurviBots.utils.database import is_on_off
+from PurviBots.utils.formatters import time_to_seconds
 
-import config
-from PurviBots import app
-from PurviBots.utils.formatters import (
-    check_duration,
-    convert_bytes,
-    get_readable_time,
-    seconds_to_min,
-)
+from os import getenv
+
+API_URL = getenv("API_URL", "https://pytdbotapi.thequickearn.xyz")
+VIDEO_API_URL = getenv("VIDEO_API_URL", "https://api.video.thequickearn.xyz")
+API_KEY = getenv("API_KEY", "YOUR_KEY")
+
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-class TeleAPI:
+# -------------------- COOKIES --------------------
+
+def cookie_txt_file():
+    path = "cookies"
+    if not os.path.exists(path):
+        return None
+    files = [f for f in os.listdir(path) if f.endswith(".txt")]
+    return os.path.join(path, random.choice(files)) if files else None
+
+
+# -------------------- API AUDIO --------------------
+
+async def download_song(link: str):
+    video_id = link.split("v=")[-1].split("&")[0]
+    file_path = f"{DOWNLOAD_DIR}/{video_id}.mp3"
+
+    if os.path.exists(file_path):
+        return file_path
+
+    api_url = f"{API_URL}/song/{video_id}?api={API_KEY}"
+
+    async with aiohttp.ClientSession() as session:
+        for _ in range(10):
+            async with session.get(api_url) as r:
+                data = await r.json()
+                if data.get("status") == "done":
+                    url = data["link"]
+                    async with session.get(url) as f:
+                        with open(file_path, "wb") as out:
+                            out.write(await f.read())
+                    return file_path
+                await asyncio.sleep(4)
+
+    return None
+
+
+# -------------------- API VIDEO --------------------
+
+async def download_video(link: str):
+    video_id = link.split("v=")[-1].split("&")[0]
+    file_path = f"{DOWNLOAD_DIR}/{video_id}.mp4"
+
+    if os.path.exists(file_path):
+        return file_path
+
+    api_url = f"{VIDEO_API_URL}/video/{video_id}?api={API_KEY}"
+
+    async with aiohttp.ClientSession() as session:
+        for _ in range(10):
+            async with session.get(api_url) as r:
+                data = await r.json()
+                if data.get("status") == "done":
+                    url = data["link"]
+                    async with session.get(url) as f:
+                        with open(file_path, "wb") as out:
+                            out.write(await f.read())
+                    return file_path
+                await asyncio.sleep(6)
+
+    return None
+
+
+# -------------------- FILE SIZE CHECK --------------------
+
+async def check_file_size(link):
+    cookie = cookie_txt_file()
+    if not cookie:
+        return None
+
+    proc = await asyncio.create_subprocess_exec(
+        "yt-dlp", "--cookies", cookie, "-J", link,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    out, _ = await proc.communicate()
+    data = json.loads(out.decode())
+    return sum(f.get("filesize", 0) for f in data.get("formats", []))
+
+
+# -------------------- YOUTUBE API --------------------
+
+class YouTubeAPI:
+
     def __init__(self):
-        self.chars_limit = 4096
-        self.sleep = 5
+        self.base = "https://www.youtube.com/watch?v="
+        self.regex = r"(youtube\.com|youtu\.be)"
 
-    async def send_split_text(self, message, string):
-        n = self.chars_limit
-        out = [(string[i : i + n]) for i in range(0, len(string), n)]
-        j = 0
-        for x in out:
-            if j <= 2:
-                j += 1
-                await message.reply_text(x, disable_web_page_preview=True)
-        return True
+    async def url(self, message: Message):
+        for msg in [message, message.reply_to_message]:
+            if not msg:
+                continue
+            if msg.entities:
+                for e in msg.entities:
+                    if e.type == MessageEntityType.URL:
+                        return msg.text[e.offset:e.offset + e.length]
+        return None
 
-    async def get_link(self, message):
-        return message.link
+    async def details(self, link):
+        r = VideosSearch(link, limit=1)
+        v = (await r.next())["result"][0]
+        return (
+            v["title"],
+            v["duration"],
+            int(time_to_seconds(v["duration"])) if v["duration"] else 0,
+            v["thumbnails"][0]["url"],
+            v["id"],
+        )
 
-    async def get_filename(self, file, audio: Union[bool, str] = None):
-        try:
-            file_name = file.file_name
-            if file_name is None:
-                file_name = "ᴛᴇʟᴇɢʀᴀᴍ ᴀᴜᴅɪᴏ" if audio else "ᴛᴇʟᴇɢʀᴀᴍ ᴠɪᴅᴇᴏ"
-        except:
-            file_name = "ᴛᴇʟᴇɢʀᴀᴍ ᴀᴜᴅɪᴏ" if audio else "ᴛᴇʟᴇɢʀᴀᴍ ᴠɪᴅᴇᴏ"
-        return file_name
-
-    async def get_duration(self, file):
-        try:
-            dur = seconds_to_min(file.duration)
-        except:
-            dur = "Unknown"
-        return dur
-
-    async def get_duration(self, filex, file_path):
-        try:
-            dur = seconds_to_min(filex.duration)
-        except:
-            try:
-                dur = await asyncio.get_event_loop().run_in_executor(
-                    None, check_duration, file_path
-                )
-                dur = seconds_to_min(dur)
-            except:
-                return "Unknown"
-        return dur
-
-    async def get_filepath(
-        self,
-        audio: Union[bool, str] = None,
-        video: Union[bool, str] = None,
-    ):
+    async def download(self, link, video=False, audio=False):
         if audio:
-            try:
-                file_name = (
-                    audio.file_unique_id
-                    + "."
-                    + (
-                        (audio.file_name.split(".")[-1])
-                        if (not isinstance(audio, Voice))
-                        else "ogg"
-                    )
-                )
-            except:
-                file_name = audio.file_unique_id + "." + "ogg"
-            file_name = os.path.join(os.path.realpath("downloads"), file_name)
+            return await download_song(link), True
+
         if video:
-            try:
-                file_name = (
-                    video.file_unique_id + "." + (video.file_name.split(".")[-1])
-                )
-            except:
-                file_name = video.file_unique_id + "." + "mp4"
-            file_name = os.path.join(os.path.realpath("downloads"), file_name)
-        return file_name
+            file = await download_video(link)
+            if file:
+                return file, True
 
-    async def download(self, _, message, mystic, fname):
-        lower = [0, 8, 17, 38, 64, 77, 96]
-        higher = [5, 10, 20, 40, 66, 80, 99]
-        checker = [5, 10, 20, 40, 66, 80, 99]
-        speed_counter = {}
-        if os.path.exists(fname):
-            return True
+            size = await check_file_size(link)
+            if size and size / (1024 * 1024) > 250:
+                return None, None
 
-        async def down_load():
-            async def progress(current, total):
-                if current == total:
-                    return
-                current_time = time.time()
-                start_time = speed_counter.get(message.id)
-                check_time = current_time - start_time
-                upl = InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                text="ᴄᴀɴᴄᴇʟ",
-                                callback_data="stop_downloading",
-                            ),
-                        ]
-                    ]
-                )
-                percentage = current * 100 / total
-                percentage = str(round(percentage, 2))
-                speed = current / check_time
-                eta = int((total - current) / speed)
-                eta = get_readable_time(eta)
-                if not eta:
-                    eta = "0 sᴇᴄᴏɴᴅs"
-                total_size = convert_bytes(total)
-                completed_size = convert_bytes(current)
-                speed = convert_bytes(speed)
-                percentage = int((percentage.split("."))[0])
-                for counter in range(7):
-                    low = int(lower[counter])
-                    high = int(higher[counter])
-                    check = int(checker[counter])
-                    if low < percentage <= high:
-                        if high == check:
-                            try:
-                                await mystic.edit_text(
-                                    text=_["tg_1"].format(
-                                        app.mention,
-                                        total_size,
-                                        completed_size,
-                                        percentage[:5],
-                                        speed,
-                                        eta,
-                                    ),
-                                    reply_markup=upl,
-                                )
-                                checker[counter] = 100
-                            except:
-                                pass
+            cookie = cookie_txt_file()
+            if not cookie:
+                return None, None
 
-            speed_counter[message.id] = time.time()
-            try:
-                await app.download_media(
-                    message.reply_to_message,
-                    file_name=fname,
-                    progress=progress,
-                )
-                try:
-                    elapsed = get_readable_time(
-                        int(int(time.time()) - int(speed_counter[message.id]))
-                    )
-                except:
-                    elapsed = "0 sᴇᴄᴏɴᴅs"
-                await mystic.edit_text(_["tg_2"].format(elapsed))
-            except:
-                await mystic.edit_text(_["tg_3"])
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp", "--cookies", cookie, "-f",
+                "best[height<=720]", "-o",
+                f"{DOWNLOAD_DIR}/%(id)s.%(ext)s", link
+            )
+            await proc.communicate()
+            return True, False
 
-        task = asyncio.create_task(down_load())
-        config.lyrical[mystic.id] = task
-        await task
-        verify = config.lyrical.get(mystic.id)
-        if not verify:
-            return False
-        config.lyrical.pop(mystic.id)
-        return True
+        return None, None
